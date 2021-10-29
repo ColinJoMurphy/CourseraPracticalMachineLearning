@@ -1,0 +1,152 @@
+---
+title: "Detecting Poor Weightlifting Form With Fitness Trackers"
+author: "Colin Murphy"
+date: "10/2/2021"
+output: html_document
+---
+## Overview
+In the following report, we use data gathered via fitness trackers
+to build a predictive model. The model's goal is to correctly 
+identify the type of weight lifting movement based on the fitness 
+tracker data. We perform a brief exploratory analysis of the data,
+decide on which machine learning algorithm to apply in building our
+model, and then train a model and apply it to the given testing 
+set.
+
+
+## Required Data and Packages
+First, we load all packages needed for our analysis. Note that `lattice` is loaded as it is a requirement 
+for the `caret` package, however, for our plotting purposes, we will use `ggplot2` . Next, we read in 
+the data from the respective urls in the code chuck below.
+```{r, message=FALSE}
+library(ggplot2)
+library(data.table)
+library(lattice) # Required for 'caret' package
+library(caret)
+training <- fread('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv')
+testing <- fread('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv')
+```
+
+## Exploratory Analysis
+Let's get to know the data and its structure. 
+```{r}
+head(training[,1:20])
+unique(training$user_name)
+unique(training$classe)
+training[, user_name := factor(user_name)][, classe := factor(classe)]
+```
+
+There are six subjects and five different types of exercise. The metadata (found at
+https://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har#weight_lifting_exercises)
+indicates that of the exercise classes, `A` is a specified exercise with correct form while the others are 
+the same exercise with various common form mistakes. We made both `user_name` and `classe` factors. 
+Additionally, we notice there are a number of variables that seem to have many `NA` values. Let's
+investigate those variables further.
+
+```{r}
+percent.na <- data.table()
+for (n in names(training)){
+  na <- sum(is.na(training[,get(n)]))
+  percent <- (na/nrow(training))*100
+  percent.na <- rbind(percent.na, data.table('var' = c(n), 'percent' = c(percent)))
+}
+head(percent.na[percent>0])
+percent.na[percent > 0, min(percent)]
+
+```
+The above code tells us of all the variables with `NA` values, the variable with the *least* `NA` values 
+still is 97.9% missing values. That many
+missing values is not worth dealing with, so we will exclude those columns from our analysis. 
+Note that these variables seem to be calculated variables, such as kurtosis, skewness, average, and variance. 
+Removing these from our training set leaves us with the raw positional and acceleration data.
+
+```{r}
+calcvars <- percent.na[percent > 0, var]
+rawvars <- names(training)[!(names(training) %in% calcvars)]
+training <- training[,..rawvars]
+```
+Next, we'll plot a few of our variables to see if there are any obvious 
+connections.
+```{r}
+ggplot(training, aes(total_accel_belt, accel_dumbbell_z, color = classe))+ geom_point(alpha =.3)
+
+ggplot(training, aes(total_accel_belt, accel_dumbbell_y, color = classe))+ geom_point(alpha =.3)
+
+ggplot(training, aes(total_accel_arm, accel_dumbbell_z, color = classe))+ geom_point(alpha =.3)
+```
+
+The plots above suggest that there is probably no single clear dependency to use as our 
+predictor in our model. We can infer from this that more complicated algorithms may be needed.
+
+## Building a Predictive Model
+
+The first task is to divide our training set into a few different training and validation sets. We will use k-fold cross 
+validation to assess the competency of 
+different algorithms to predict exercise class. We use k=5 for our folds to limit the impact 
+of the bias-variance trade off.
+```{r}
+trainingraw <- training[, 7:60]
+folds <- createFolds(trainingraw$classe, k=5)
+```
+Now that our training set has been partitioned into five folds, let's test a 
+couple models. We will start with two models, one using boosting, and one using 
+linear discriminant analysis. The following code chunks iterate through the
+folds, train a model to the data leaving out the current fold, then test the 
+model on the current fold that was left out in model training. Then model 
+accuracy is saved and the model discarded.
+```{r, cache=TRUE, message=FALSE}
+results.gbm <- data.table()
+for (f in 1:5){
+  validate <- trainingraw[folds[[f]]]
+  validate[, classe := factor(classe, levels = c('A', 'B', 'C', 'D', 'E'))]
+  train <- trainingraw[-folds[[f]]]
+  mdl <- train(classe~., data = train, method = 'gbm', verbose = FALSE)
+  pred <- predict(mdl, validate)
+  res <- confusionMatrix(pred, validate$classe)
+  results.gbm <- rbind(results.gbm, res$overall[1])
+}
+
+results.lda <- data.table()
+for (f in 1:5){
+  validate <- trainingraw[folds[[f]]]
+  validate[, classe := factor(classe, levels = c('A', 'B', 'C', 'D', 'E'))]
+  train <- trainingraw[-folds[[f]]]
+  mdl <- train(classe~., data = train, method = 'lda', verbose = FALSE)
+  pred <- predict(mdl, validate)
+  res <- confusionMatrix(pred, validate$classe)
+  results.lda <- rbind(results.lda, res$overall[1])
+}
+```
+Now we compare each algorithm's accuracy.
+```{r}
+results.gbm[,mean(x)]; results.lda[,mean(x)]
+ggplot(data.table(results.gbm, 1:5), aes(V2, x)) + 
+  geom_point( color = 'steelblue', alpha = .5) + 
+  geom_line( color = 'steelblue', alpha = .5, size = 1) +
+  geom_point(aes( 1:5,results.lda[,x]), color = 'coral', alpha = .5) + 
+  geom_line(aes( 1:5,results.lda[,x]), color = 'coral', alpha = .5, size= 1) +
+  labs(y = 'accuracy', x = 'fold')
+```
+
+Clearly, the boosting algorithm (blue) is much more accurate at predicting `classe`. Thus, for our final model
+selection, we will use only the boosting algorithm. That model is trained with the code chunk below.
+
+```{r, cache=TRUE, message=FALSE}
+finalmdl <- train(classe~., data = trainingraw, method = "gbm", verbose = FALSE)
+```
+
+With our algorithm chosen, and our model trained appropriately, we can now apply our model 
+to the testing set. Recall, even though our average in sample error rate is around 1%, we 
+generally do not expect to see an out of sample error rate that low. However, as our k-fold validation iterations
+showed little difference between the in sample error rates (shown below), our expected out of sample 
+error rate should not more than few points higher. 
+```{r}
+results.gbm
+```
+
+In the code below, we use our model to predict the testing set. We don't have access to the `classe`
+for the testing set to check our model against, so we simply view the predicted ones.
+```{r}
+test.pred <- predict(finalmdl, testing)
+test.pred
+```
